@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -22,141 +23,127 @@ type chirp struct {
 	UserId    uuid.UUID `json:"user_id"`
 }
 
-func (config *ApiConfig) CreateChirpHandler() http.Handler {
+func (config *ApiConfig) CreateChirpHandler(w http.ResponseWriter, r *http.Request) {
 	type req struct {
 		Body string `json:"body"`
 	}
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		decoder := json.NewDecoder(r.Body)
-		reqData := req{}
-		err := decoder.Decode(&reqData)
-		if err != nil {
-			response.BadRequestError(w, "", err)
-			return
-		}
+	ctx, err := auth.GetSessionContext(r)
+	if err != nil {
+		response.UnauthorizedError(w, fmt.Errorf("getting session context for create chirp request: %w", err))
+	}
 
-		token, err := auth.GetBearerToken(r.Header)
-		if err != nil {
-			response.UnauthorizedError(w, err)
-			return
-		}
+	reqData := req{}
+	err = json.NewDecoder(r.Body).Decode(&reqData)
+	if err != nil {
+		response.BadRequestError(w, "", fmt.Errorf("decoding create chirp request: %w", err))
+		return
+	}
 
-		userID, err := auth.ValidateJWT(token, config.jwtSecret)
-		if err != nil {
-			response.UnauthorizedError(w, err)
-			return
-		}
+	params := database.CreateChirpParams{
+		ID:        uuid.New(),
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Body:      reqData.Body,
+		UserID:    ctx.UserID,
+	}
 
-		params := database.CreateChirpParams{
-			ID:        uuid.New(),
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
-			Body:      reqData.Body,
-			UserID:    userID,
-		}
+	createdChirp, err := config.db.CreateChirp(r.Context(), params)
+	if err != nil {
+		response.InternalServerError(w, fmt.Errorf("creating chirp %v in db: %w", params.ID, err))
+		return
+	}
 
-		createdChirp, err := config.db.CreateChirp(r.Context(), params)
-		if err != nil {
-			response.InternalServerError(w, err)
-			return
-		}
+	resData := chirp{
+		ID:        createdChirp.ID,
+		CreatedAt: createdChirp.CreatedAt,
+		UpdatedAt: createdChirp.UpdatedAt,
+		Body:      createdChirp.Body,
+		UserId:    createdChirp.UserID,
+	}
 
-		resData := chirp{
-			ID:        createdChirp.ID,
-			CreatedAt: createdChirp.CreatedAt,
-			UpdatedAt: createdChirp.UpdatedAt,
-			Body:      createdChirp.Body,
-			UserId:    createdChirp.UserID,
-		}
-
-		response.JSON(w, http.StatusCreated, resData)
-	})
+	response.JSON(w, http.StatusCreated, resData)
 }
 
-func (config *ApiConfig) FetchChirpsHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fetchedChirps, err := config.db.FetchAllChirps(r.Context())
-		if err != nil {
-			response.InternalServerError(w, err)
-			return
-		}
+func (config *ApiConfig) FetchChirpsHandler(w http.ResponseWriter, r *http.Request) {
+	fetchedChirps, err := config.db.FetchAllChirps(r.Context())
+	if err != nil {
+		response.InternalServerError(w, fmt.Errorf("fetching chirps from db: %w", err))
+		return
+	}
 
-		resData := make([]chirp, 0, len(fetchedChirps))
-		for _, fetchedChirp := range fetchedChirps {
-			resData = append(resData, chirp{
-				ID:        fetchedChirp.ID,
-				CreatedAt: fetchedChirp.CreatedAt,
-				UpdatedAt: fetchedChirp.UpdatedAt,
-				Body:      fetchedChirp.Body,
-				UserId:    fetchedChirp.UserID,
-			})
-		}
-
-		response.JSON(w, http.StatusOK, resData)
-	})
-}
-
-func (config *ApiConfig) FetchChirpHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		chirpId := r.PathValue("id")
-		parsedId, err := uuid.Parse(chirpId)
-		if err != nil {
-			response.BadRequestError(w, "Malformed chirp ID", err)
-			return
-		}
-
-		fetchedChirp, err := config.db.FetchChirp(r.Context(), parsedId)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				response.GenericError(w, http.StatusNotFound, "Chirp Not Found", err)
-				return
-			}
-
-			response.InternalServerError(w, err)
-			return
-		}
-
-		resData := chirp{
+	resData := make([]chirp, 0, len(fetchedChirps))
+	for _, fetchedChirp := range fetchedChirps {
+		resData = append(resData, chirp{
 			ID:        fetchedChirp.ID,
 			CreatedAt: fetchedChirp.CreatedAt,
 			UpdatedAt: fetchedChirp.UpdatedAt,
 			Body:      fetchedChirp.Body,
 			UserId:    fetchedChirp.UserID,
-		}
+		})
+	}
 
-		response.JSON(w, http.StatusOK, resData)
-	})
+	response.JSON(w, http.StatusOK, resData)
 }
 
-type validateChirpReq struct {
-	Body string `json:"body"`
-}
+func (config *ApiConfig) FetchChirpHandler(w http.ResponseWriter, r *http.Request) {
+	chirpId := r.PathValue("id")
+	parsedId, err := uuid.Parse(chirpId)
+	if err != nil {
+		response.BadRequestError(w, "Malformed chirp ID", fmt.Errorf("parsing chirp id for fetch chirp request"))
+		return
+	}
 
-type validateChirpRes struct {
-	Error       string `json:"error"`
-	Valid       bool   `json:"valid"`
-	CleanedBody string `json:"cleaned_body"`
-}
-
-func (config *ApiConfig) ValidateChirpHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		reqData := validateChirpReq{}
-		if err := json.NewDecoder(r.Body).Decode(&reqData); err != nil {
-			response.BadRequestError(w, "", err)
+	fetchedChirp, err := config.db.FetchChirp(r.Context(), parsedId)
+	if err != nil {
+		errMsg := fmt.Errorf("fetching chirp %v from db: %w", parsedId, err)
+		if errors.Is(err, sql.ErrNoRows) {
+			response.GenericError(w, http.StatusNotFound, "Chirp Not Found", errMsg)
 			return
 		}
 
-		if len(reqData.Body) > 140 {
-			response.BadRequestError(w, "Chirp length exceeds 140", nil)
-		}
+		response.InternalServerError(w, errMsg)
+		return
+	}
 
-		resData := validateChirpRes{}
-		resData.Valid = true
-		resData.CleanedBody = cleanInput(reqData.Body)
+	resData := chirp{
+		ID:        fetchedChirp.ID,
+		CreatedAt: fetchedChirp.CreatedAt,
+		UpdatedAt: fetchedChirp.UpdatedAt,
+		Body:      fetchedChirp.Body,
+		UserId:    fetchedChirp.UserID,
+	}
 
-		response.JSON(w, http.StatusOK, resData)
-	})
+	response.JSON(w, http.StatusOK, resData)
+}
+
+func (config *ApiConfig) ValidateChirpHandler(w http.ResponseWriter, r *http.Request) {
+	type req struct {
+		Body string `json:"body"`
+	}
+
+	type res struct {
+		Valid       bool   `json:"valid"`
+		CleanedBody string `json:"cleaned_body"`
+	}
+
+	reqData := req{}
+	if err := json.NewDecoder(r.Body).Decode(&reqData); err != nil {
+		response.BadRequestError(w, "", fmt.Errorf("decoding validate chirp request: %w", err))
+		return
+	}
+
+	if len(reqData.Body) > 140 {
+		response.BadRequestError(w, "Chirp length exceeds 140 word length", fmt.Errorf("validating chirp: chirp request exceeds 140 word length"))
+		return
+	}
+
+	resData := res{
+		Valid:       true,
+		CleanedBody: cleanInput(reqData.Body),
+	}
+
+	response.JSON(w, http.StatusOK, resData)
 }
 
 func cleanInput(input string) (cleanedString string) {

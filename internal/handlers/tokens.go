@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -16,31 +17,32 @@ func (config *ApiConfig) RefreshHandler(w http.ResponseWriter, r *http.Request) 
 		Token string `json:"token"`
 	}
 
-	token, err := auth.GetBearerToken(r.Header)
+	context, err := auth.GetSessionContext(r)
 	if err != nil {
-		response.UnauthorizedError(w, err)
+		response.UnauthorizedError(w, fmt.Errorf("getting session context for refresh request: %w", err))
 		return
 	}
 
 	params := database.FetchRefreshTokenParams{
-		Token:     token,
+		Token:     context.Token,
 		ExpiresAt: time.Now(),
 	}
 
 	refreshTokenRow, err := config.db.FetchRefreshToken(r.Context(), params)
 	if err != nil {
+		errMsg := fmt.Errorf("fetching refresh token %s from db: %w", context.Token, err)
 		if errors.Is(err, sql.ErrNoRows) {
-			response.UnauthorizedError(w, errors.New("refresh token not found in db"))
+			response.UnauthorizedError(w, errMsg)
 			return
 		}
 
-		response.InternalServerError(w, err)
+		response.InternalServerError(w, errMsg)
 		return
 	}
 
 	jwtToken, err := auth.MakeJWT(refreshTokenRow.UserID, config.jwtSecret)
 	if err != nil {
-		response.InternalServerError(w, err)
+		response.InternalServerError(w, fmt.Errorf("making jwt for refresh request: %w", err))
 		return
 	}
 
@@ -52,14 +54,14 @@ func (config *ApiConfig) RefreshHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 func (config *ApiConfig) RevokeHandler(w http.ResponseWriter, r *http.Request) {
-	token, err := auth.GetBearerToken(r.Header)
+	ctx, err := auth.GetSessionContext(r)
 	if err != nil {
-		response.UnauthorizedError(w, err)
+		response.UnauthorizedError(w, fmt.Errorf("getting session context for revoke request: %w", err))
 		return
 	}
 
 	params := database.RevokeRefreshTokenParams{
-		Token: token,
+		Token: ctx.Token,
 		RevokedAt: sql.NullTime{
 			Time:  time.Now(),
 			Valid: true,
@@ -68,12 +70,12 @@ func (config *ApiConfig) RevokeHandler(w http.ResponseWriter, r *http.Request) {
 
 	affectedRows, err := config.db.RevokeRefreshToken(r.Context(), params)
 	if err != nil {
-		response.InternalServerError(w, err)
+		response.InternalServerError(w, fmt.Errorf("revoking refresh token %s for revoke request: %w", ctx.Token, err))
 		return
 	}
 
 	if affectedRows == 0 {
-		response.UnauthorizedError(w, errors.New("invalid refresh token"))
+		response.UnauthorizedError(w, fmt.Errorf("revoke token %s invalid for revoke request", ctx.Token))
 		return
 	}
 

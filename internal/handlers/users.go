@@ -9,15 +9,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
+	"github.com/lib/pq/pqerror"
 	"github.com/snahmik/golang-http-server/internal/auth"
 	"github.com/snahmik/golang-http-server/internal/database"
 	"github.com/snahmik/golang-http-server/internal/response"
 )
 
-type userReq struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
-}
 type user struct {
 	ID        uuid.UUID `json:"id"`
 	CreatedAt time.Time `json:"created_at"`
@@ -26,45 +24,59 @@ type user struct {
 	Password  string    `json:"password"`
 }
 
-func (config *ApiConfig) CreateUserHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		decoder := json.NewDecoder(r.Body)
-		reqData := userReq{}
-		err := decoder.Decode(&reqData)
-		if err != nil {
-			response.BadRequestError(w, "", err)
-			return
+func (config *ApiConfig) CreateUserHandler(w http.ResponseWriter, r *http.Request) {
+	type req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	reqData := req{}
+	err := decoder.Decode(&reqData)
+	if err != nil {
+		response.BadRequestError(w, "", fmt.Errorf("decoding create user request: %w", err))
+		return
+	}
+
+	hashedUserPassword, err := auth.HashPassword(reqData.Password)
+	if err != nil {
+		response.InternalServerError(w, fmt.Errorf("hashing password for create user request: %w", err))
+		return
+	}
+
+	params := database.CreateUserParams{
+		ID:             uuid.New(),
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		Email:          reqData.Email,
+		HashedPassword: hashedUserPassword,
+	}
+
+	createdUser, err := config.db.CreateUser(r.Context(), params)
+	if err != nil {
+		errMsg := fmt.Errorf("creating user with id %v in db: %w", params.ID, err)
+
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) {
+			switch pqErr.Code {
+			case pqerror.UniqueViolation:
+				response.GenericError(w, http.StatusConflict, "Email already exists", errMsg)
+				return
+			}
 		}
 
-		hashedUserPassword, err := auth.HashPassword(reqData.Password)
-		if err != nil {
-			response.InternalServerError(w, err)
-			return
-		}
+		response.InternalServerError(w, errMsg)
+		return
+	}
 
-		params := database.CreateUserParams{
-			ID:             uuid.New(),
-			CreatedAt:      time.Now(),
-			UpdatedAt:      time.Now(),
-			Email:          reqData.Email,
-			HashedPassword: hashedUserPassword,
-		}
+	resData := user{
+		ID:        createdUser.ID,
+		CreatedAt: createdUser.CreatedAt,
+		UpdatedAt: createdUser.UpdatedAt,
+		Email:     createdUser.Email,
+	}
 
-		createdUser, err := config.db.CreateUser(r.Context(), params)
-		if err != nil {
-			response.InternalServerError(w, err)
-			return
-		}
-
-		resData := user{
-			ID:        createdUser.ID,
-			CreatedAt: createdUser.CreatedAt,
-			UpdatedAt: createdUser.UpdatedAt,
-			Email:     createdUser.Email,
-		}
-
-		response.JSON(w, http.StatusCreated, resData)
-	})
+	response.JSON(w, http.StatusCreated, resData)
 }
 
 func (config *ApiConfig) LoginUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -81,36 +93,36 @@ func (config *ApiConfig) LoginUserHandler(w http.ResponseWriter, r *http.Request
 
 	reqData := req{}
 	if err := json.NewDecoder(r.Body).Decode(&reqData); err != nil {
-		response.BadRequestError(w, "", err)
+		response.BadRequestError(w, "", fmt.Errorf("decoding login request: %w", err))
 		return
 	}
 
 	fetchedUser, err := config.db.FetchUser(r.Context(), reqData.Email)
 	if err != nil {
+		errMsg := fmt.Errorf("fetching user %v from db: %w", err)
 		if errors.Is(err, sql.ErrNoRows) {
-			response.UnauthorizedError(w, err)
+			response.UnauthorizedError(w, errMsg)
 			return
 		}
 
-		response.InternalServerError(w, fmt.Errorf("login user database error: %v", err))
+		response.InternalServerError(w, errMsg)
 		return
 	}
 
 	isValid, err := auth.CheckPassword(reqData.Password, fetchedUser.HashedPassword)
 	if err != nil {
-		response.InternalServerError(w, err)
+		response.InternalServerError(w, fmt.Errorf("checking password from login request: %w", err))
 		return
 	}
 
 	if !isValid {
-		response.UnauthorizedError(w, errors.New("invalid email or password"))
+		response.UnauthorizedError(w, errors.New("checking password from login request: invalid email or password"))
 		return
 	}
 
-	//access token expiry is one hour
 	accessToken, err := auth.MakeJWT(fetchedUser.ID, config.jwtSecret)
 	if err != nil {
-		response.InternalServerError(w, err)
+		response.InternalServerError(w, fmt.Errorf("creating jwt for login request: %w", err))
 		return
 	}
 
@@ -125,7 +137,7 @@ func (config *ApiConfig) LoginUserHandler(w http.ResponseWriter, r *http.Request
 	}
 	refreshTokenEntry, err := config.db.CreateRefreshToken(r.Context(), params)
 	if err != nil {
-		response.InternalServerError(w, err)
+		response.InternalServerError(w, fmt.Errorf("creating refresh token for user %v in db: %w", fetchedUser.ID, err))
 		return
 	}
 
@@ -142,3 +154,23 @@ func (config *ApiConfig) LoginUserHandler(w http.ResponseWriter, r *http.Request
 
 	response.JSON(w, http.StatusOK, resData)
 }
+
+//func (config *ApiConfig) UpdateUserHandler(w http.ResponseWriter, r *http.Request) {
+//	type req struct {
+//		Email    string `json:"email"`
+//		Password string `json:"password"`
+//	}
+//
+//	ctx, err := auth.GetSessionContext(r)
+//	if err != nil {
+//		response.UnauthorizedError(w,fmt.Errorf("getting session context for update user request: %w",err))
+//		return
+//	}
+//
+//	params := database.UpdateUserParams{
+//		Email:          "",
+//		HashedPassword: "",
+//		ID:             ctx.UserID,
+//	}
+//	affectedRows, err := config.db.UpdateUser()
+//}

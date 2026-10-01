@@ -56,13 +56,13 @@ func (q *Queries) DeleteUsers(ctx context.Context) error {
 	return err
 }
 
-const fetchUser = `-- name: FetchUser :one
+const fetchUserByEmail = `-- name: FetchUserByEmail :one
 SELECT id, created_at, updated_at, email, hashed_password FROM users
 WHERE email = $1
 `
 
-func (q *Queries) FetchUser(ctx context.Context, email string) (User, error) {
-	row := q.db.QueryRowContext(ctx, fetchUser, email)
+func (q *Queries) FetchUserByEmail(ctx context.Context, email string) (User, error) {
+	row := q.db.QueryRowContext(ctx, fetchUserByEmail, email)
 	var i User
 	err := row.Scan(
 		&i.ID,
@@ -74,22 +74,52 @@ func (q *Queries) FetchUser(ctx context.Context, email string) (User, error) {
 	return i, err
 }
 
-const updateUser = `-- name: UpdateUser :execrows
+const fetchUserById = `-- name: FetchUserById :one
+SELECT id, created_at, updated_at, email, hashed_password FROM users
+WHERE id = $1
+`
+
+func (q *Queries) FetchUserById(ctx context.Context, id uuid.UUID) (User, error) {
+	row := q.db.QueryRowContext(ctx, fetchUserById, id)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Email,
+		&i.HashedPassword,
+	)
+	return i, err
+}
+
+const updateUser = `-- name: UpdateUser :one
 UPDATE users
-SET email = $1, hashed_password = $2
-WHERE id = $3
+SET email = $1, hashed_password = $2, updated_at = $3
+WHERE id = $4
+RETURNING id, created_at, updated_at, email, hashed_password
 `
 
 type UpdateUserParams struct {
 	Email          string
 	HashedPassword string
+	UpdatedAt      time.Time
 	ID             uuid.UUID
 }
 
-func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, updateUser, arg.Email, arg.HashedPassword, arg.ID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) (User, error) {
+	row := q.db.QueryRowContext(ctx, updateUser,
+		arg.Email,
+		arg.HashedPassword,
+		arg.UpdatedAt,
+		arg.ID,
+	)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Email,
+		&i.HashedPassword,
+	)
+	return i, err
 }

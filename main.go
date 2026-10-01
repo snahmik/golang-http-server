@@ -44,7 +44,7 @@ func main() {
 	mux.HandleFunc("POST /api/login", config.LoginUserHandler)
 
 	mux.HandleFunc("POST /api/users", config.CreateUserHandler)
-	mux.Handle("PUT /api/users", config.MiddlewareAuthRefreshToken(config.UpdateUserHandler))
+	mux.Handle("PUT /api/users", config.MiddlewareAuthJWT(config.UpdateUserHandler))
 
 	server := &http.Server{
 		Handler: mux,

@@ -5,14 +5,19 @@ VALUES (
        )
 RETURNING *;
 
--- name: FetchUser :one
+-- name: FetchUserByEmail :one
 SELECT * FROM users
 WHERE email = $1;
+
+-- name: FetchUserById :one
+SELECT * FROM users
+WHERE id = $1;
 
 -- name: DeleteUsers :exec
 DELETE FROM users;
 
--- name: UpdateUser :execrows
+-- name: UpdateUser :one
 UPDATE users
-SET email = $1, hashed_password = $2
-WHERE id = $3;
+SET email = $1, hashed_password = $2, updated_at = $3
+WHERE id = $4
+RETURNING *;

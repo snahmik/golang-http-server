@@ -97,9 +97,9 @@ func (config *ApiConfig) LoginUserHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	fetchedUser, err := config.db.FetchUser(r.Context(), reqData.Email)
+	fetchedUser, err := config.db.FetchUserByEmail(r.Context(), reqData.Email)
 	if err != nil {
-		errMsg := fmt.Errorf("fetching user %v from db: %w", err)
+		errMsg := fmt.Errorf("fetching user %v from db: %w", reqData.Email, err)
 		if errors.Is(err, sql.ErrNoRows) {
 			response.UnauthorizedError(w, errMsg)
 			return
@@ -155,22 +155,64 @@ func (config *ApiConfig) LoginUserHandler(w http.ResponseWriter, r *http.Request
 	response.JSON(w, http.StatusOK, resData)
 }
 
-//func (config *ApiConfig) UpdateUserHandler(w http.ResponseWriter, r *http.Request) {
-//	type req struct {
-//		Email    string `json:"email"`
-//		Password string `json:"password"`
-//	}
-//
-//	ctx, err := auth.GetSessionContext(r)
-//	if err != nil {
-//		response.UnauthorizedError(w,fmt.Errorf("getting session context for update user request: %w",err))
-//		return
-//	}
-//
-//	params := database.UpdateUserParams{
-//		Email:          "",
-//		HashedPassword: "",
-//		ID:             ctx.UserID,
-//	}
-//	affectedRows, err := config.db.UpdateUser()
-//}
+func (config *ApiConfig) UpdateUserHandler(w http.ResponseWriter, r *http.Request) {
+	type req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	reqData := req{}
+	err := json.NewDecoder(r.Body).Decode(&reqData)
+	if err != nil {
+		response.BadRequestError(w, "", fmt.Errorf("decoding update user request"))
+		return
+	}
+
+	ctx, err := auth.GetSessionContext(r)
+	if err != nil {
+		response.UnauthorizedError(w, fmt.Errorf("getting session context for update user request: %w", err))
+		return
+	}
+
+	userRow, err := config.db.FetchUserById(r.Context(), ctx.UserID)
+	if err != nil {
+		response.UnauthorizedError(w, fmt.Errorf("fetching user by id for update user request: %w", err))
+		return
+	}
+
+	params := database.UpdateUserParams{
+		Email:          userRow.Email,
+		HashedPassword: userRow.HashedPassword,
+		UpdatedAt:      time.Now(),
+		ID:             ctx.UserID,
+	}
+
+	if reqData.Email != "" {
+		params.Email = reqData.Email
+	}
+
+	if reqData.Password != "" {
+		hashedPassword, err := auth.HashPassword(reqData.Password)
+		if err != nil {
+			response.InternalServerError(w, fmt.Errorf("hashing password for update user request: %w", err))
+			return
+		}
+
+		params.HashedPassword = hashedPassword
+	}
+
+	updatedUserRow, err := config.db.UpdateUser(r.Context(), params)
+	if err != nil {
+		response.InternalServerError(w, fmt.Errorf("updating user %v in db for update user request", ctx.UserID))
+		return
+	}
+
+	resData := user{
+		ID:        updatedUserRow.ID,
+		CreatedAt: updatedUserRow.CreatedAt,
+		UpdatedAt: updatedUserRow.UpdatedAt,
+		Email:     updatedUserRow.Email,
+	}
+
+	response.JSON(w, http.StatusOK, resData)
+}
